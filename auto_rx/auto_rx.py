@@ -218,6 +218,7 @@ def start_decoder(freq, sonde_type):
             exporter = exporter_functions,
             timeout = config['rx_timeout'],
             telem_filter = telemetry_filter,
+            telem_raw = config['send_raw_frame_in_telemetry'],
             rs92_ephemeris = rs92_ephemeris,
             imet_location = config['station_code'],
             rs41_drift_tweak = config['rs41_drift_tweak'],

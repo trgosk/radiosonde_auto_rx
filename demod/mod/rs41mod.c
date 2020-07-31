@@ -51,6 +51,7 @@ typedef struct {
     i8_t inv;
     i8_t aut;
     i8_t jsn;  // JSON output (auto_rx)
+    i8_t jrf;  // Include Raw frame in JSON
     i8_t slt;  // silent
 } option_t;
 
@@ -1376,6 +1377,13 @@ static int print_position(gpx_t *gpx, int ec) {
                                 fprintf(stdout, ", \"encrypted\": false");
                             }
                         }
+                        if (gpx->option.jrf) {
+                            fprintf(stdout, ", \"raw\": \"");
+                            for (i = 0; i < flen; i++) {
+                                fprintf(stdout, "%02x", gpx->frame[i]);
+                            }
+                            fprintf(stdout, "\"");
+                        }
                         fprintf(stdout, " }\n");
                         fprintf(stdout, "\n");
                     }
@@ -1634,6 +1642,7 @@ int main(int argc, char *argv[]) {
             gpx.option.ecc = 2;
             gpx.option.crc = 1;
         }
+        else if   (strcmp(*argv, "--json-raw-frame") == 0) { gpx.option.jrf = 1; }
         else if   (strcmp(*argv, "--rawhex") == 0) { rawhex = 2; }  // raw hex input
         else if   (strcmp(*argv, "--xorhex") == 0) { rawhex = 2; xorhex = 1; }  // raw xor input
         else if (strcmp(*argv, "-") == 0) {
