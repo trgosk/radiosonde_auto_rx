@@ -4,5 +4,5 @@ This is fork of [Projecthorus's Radiosonde auto rx](https://github.com/projectho
 
 Maintained extra features @1.3.2:
 * Include raw frame in JSON (hex string format)
-  * M10, M20
+  * M10
   * RS41

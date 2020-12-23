@@ -42,7 +42,6 @@ typedef struct {
     i8_t aut;
     i8_t col;  // colors
     i8_t jsn;  // JSON output (auto_rx)
-    i8_t jrf;  // Include Raw frame in JSON
 } option_t;
 
 
@@ -641,18 +640,6 @@ static int print_pos(gpx_t *gpx, int bcOK, int csOK) {
                 fprintf(stdout, ", \"frame\": %lu ,", (unsigned long)(sec_gps0+0.5));
                 fprintf(stdout, "\"id\": \"%s\", \"datetime\": \"%04d-%02d-%02dT%02d:%02d:%06.3fZ\", \"lat\": %.5f, \"lon\": %.5f, \"alt\": %.5f, \"vel_h\": %.5f, \"heading\": %.5f, \"vel_v\": %.5f",
                                sn_id, gpx->jahr, gpx->monat, gpx->tag, gpx->std, gpx->min, gpx->sek, gpx->lat, gpx->lon, gpx->alt, gpx->vH, gpx->vD, gpx->vV);
-                // raw frame
-                if (gpx->option.jrf) {
-                    int i;
-                    int flen = gpx->frame_bytes[0];
-                    ui8_t byte;
-                    fprintf(stdout, ", \"raw\": \"");
-                    for (i = 0; i < flen+1; i++) {
-                        byte = gpx->frame_bytes[i];
-                        fprintf(stdout, "%02x", byte);
-                    }
-                    fprintf(stdout, "\"");
-                }
                 fprintf(stdout, ", \"rawid\": \"M20_%02X%02X%02X\"", gpx->frame_bytes[pos_SN], gpx->frame_bytes[pos_SN+1], gpx->frame_bytes[pos_SN+2]); // gpx->type
                 fprintf(stdout, ", \"subtype\": \"0x%02X\"", gpx->type);
                 fprintf(stdout, " }\n");
@@ -891,7 +878,6 @@ int main(int argc, char **argv) {
             option_min = 1;
         }
         else if   (strcmp(*argv, "--json") == 0) { gpx.option.jsn = 1; }
-        else if   (strcmp(*argv, "--json-raw-frame") == 0) { gpx.option.jrf = 1; }
         else if (strcmp(*argv, "-") == 0) {
             int sample_rate = 0, bits_sample = 0, channels = 0;
             ++argv;

@@ -608,10 +608,7 @@ class SondeDecoder(object):
             demod_cmd += "./fsk_demod --cs16 -b %d -u %d -s -p 5 --stats=%d 2 %d %d - -" % (_lower, _upper, _stats_rate, _sdr_rate, _baud_rate)
 
             # M20 decoder
-            if self.telem_raw:
-                decode_cmd = "./mXXmod --json --json-raw-frame --ptu -vvv --softin -i 2>/dev/null"
-            else:
-                decode_cmd = "./mXXmod --json --ptu -vvv --softin -i 2>/dev/null"
+            decode_cmd = "./mXXmod --json --ptu -vvv --softin -i 2>/dev/null"
 
             # M20 sondes transmit in short, irregular pulses - average over the last 2 frames, and use a peak hold
             demod_stats = FSKDemodStats(averaging_time=2.0, peak_hold=True)
