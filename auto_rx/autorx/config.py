@@ -139,7 +139,6 @@ def read_auto_rx_config(filename, no_sdr_test=False):
 		'save_detection_audio' : False,
 		'save_decode_audio' : False,
 		'save_decode_iq' : False,
-		'send_raw_frame_in_telemetry': False,
 		# URL for the Habitat DB Server.
 		# As of July 2018 we send via sondehub.org, which will allow us to eventually transition away
 		# from using the habhub.org tracker, and leave it for use by High-Altitude Balloon Hobbyists.
@@ -251,7 +250,6 @@ def read_auto_rx_config(filename, no_sdr_test=False):
 		auto_rx_config['scan_delay'] = config.getint('advanced', 'scan_delay')
 		auto_rx_config['payload_id_valid'] = config.getint('advanced', 'payload_id_valid')
 		auto_rx_config['synchronous_upload'] = config.getboolean('advanced', 'synchronous_upload')
-		auto_rx_config['send_raw_frame_in_telemetry'] = config.getboolean('advanced', 'send_raw_frame_in_telemetry')
 
 		# Rotator Settings
 		auto_rx_config['rotator_enabled'] = config.getboolean('rotator','rotator_enabled')
