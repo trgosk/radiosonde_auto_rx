@@ -117,6 +117,7 @@ class SondeDecoder(object):
         exporter=None,
         timeout=180,
         telem_filter=None,
+        telem_raw=False,
         rs92_ephemeris=None,
         rs41_drift_tweak=False,
         experimental_decoder=False,
@@ -170,6 +171,7 @@ class SondeDecoder(object):
         self.save_decode_iq = save_decode_iq
 
         self.telem_filter = telem_filter
+        self.telem_raw = telem_raw
         self.timeout = timeout
         self.rs92_ephemeris = rs92_ephemeris
         self.rs41_drift_tweak = rs41_drift_tweak
@@ -597,7 +599,10 @@ class SondeDecoder(object):
                 _baud_rate,
             )
 
-            decode_cmd = "./rs41mod --ptu2 --json --softin -i 2>/dev/null"
+            if self.telem_raw:
+                decode_cmd = "./rs41mod --ptu2 --json --json-raw-frame --softin -i 2>/dev/null"
+            else:
+                decode_cmd = "./rs41mod --ptu2 --json --softin -i 2>/dev/null"
 
             # RS41s transmit pulsed beacons - average over the last 2 frames, and use a peak-hold
             demod_stats = FSKDemodStats(averaging_time=2.0, peak_hold=True)
@@ -755,7 +760,10 @@ class SondeDecoder(object):
             )
 
             # M10 decoder
-            decode_cmd = "./m10mod --json --ptu -vvv --softin -i 2>/dev/null"
+            if self.telem_raw:
+                decode_cmd = "./m10mod --json --json-raw-frame --ptu -vvv --softin -i 2>/dev/null"
+            else:
+                decode_cmd = "./m10mod --json --ptu -vvv --softin -i 2>/dev/null"
 
             # M10 sondes transmit in short, irregular pulses - average over the last 2 frames, and use a peak hold
             demod_stats = FSKDemodStats(averaging_time=2.0, peak_hold=True)
@@ -793,7 +801,10 @@ class SondeDecoder(object):
             )
 
             # M20 decoder
-            decode_cmd = "./mXXmod --json --ptu -vvv --softin -i 2>/dev/null"
+            if self.telem_raw:
+                decode_cmd = "./mXXmod --json --json-raw-frame --ptu -vvv --softin -i 2>/dev/null"
+            else:
+                decode_cmd = "./mXXmod --json --ptu -vvv --softin -i 2>/dev/null"
 
             # M20 sondes transmit in short, irregular pulses - average over the last 2 frames, and use a peak hold
             demod_stats = FSKDemodStats(averaging_time=2.0, peak_hold=True)

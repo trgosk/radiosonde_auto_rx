@@ -424,6 +424,8 @@ payload_id_valid = 3
 # Paths to the rtl_fm and rtl_power utilities. If these are on your system path, then you don't need to change these.
 sdr_fm_path = rtl_fm
 sdr_power_path = rtl_power
+# Send raw frame in telemetry
+send_raw_frame_in_telemetry = False
 
 
 ################################

@@ -35,6 +35,7 @@ typedef struct {
     i8_t aut;
     i8_t col;  // colors
     i8_t jsn;  // JSON output (auto_rx)
+    i8_t jrf;  // Include Raw frame in JSON
 } option_t;
 
 
@@ -1002,6 +1003,17 @@ static int print_pos(gpx_t *gpx, int csOK) {
                         if (gpx->_RH > -0.5) fprintf(stdout, ", \"humidity\": %.1f", gpx->_RH);
                     }
                 }
+                // raw frame
+                if (gpx->option.jrf) {
+                    int i;
+                    ui8_t byte;
+                    fprintf(stdout, ", \"raw\": \"");
+                    for (i = 0; i < FRAME_LEN+gpx->auxlen; i++) {
+                        byte = gpx->frame_bytes[i];
+                        fprintf(stdout, "%02x", byte);
+                    }
+                    fprintf(stdout, "\"");
+                }
                 fprintf(stdout, ", \"rawid\": \"M10_%02X%02X%02X%02X%02X\"", gpx->frame_bytes[pos_SN], gpx->frame_bytes[pos_SN+1],
                                                gpx->frame_bytes[pos_SN+2], gpx->frame_bytes[pos_SN+3], gpx->frame_bytes[pos_SN+4]); // gpx->type
                 fprintf(stdout, ", \"subtype\": \"0x%02X\"", gpx->type);
@@ -1237,6 +1249,7 @@ int main(int argc, char **argv) {
             option_min = 1;
         }
         else if   (strcmp(*argv, "--json") == 0) { gpx.option.jsn = 1; }
+        else if   (strcmp(*argv, "--json-raw-frame") == 0) { gpx.option.jrf = 1; }
         else if   (strcmp(*argv, "--jsn_cfq") == 0) {
             int frq = -1;  // center frequency / Hz
             ++argv;
