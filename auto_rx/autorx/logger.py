@@ -54,7 +54,7 @@ class TelemetryLogger(object):
         "heading",
     ]
 
-    LOG_HEADER = "timestamp,serial,frame,lat,lon,alt,vel_v,vel_h,heading,temp,humidity,pressure,type,freq_mhz,snr,f_error_hz,sats,batt_v,burst_timer,aux_data\n"
+    LOG_HEADER = "timestamp,serial,frame,lat,lon,alt,vel_v,vel_h,heading,temp,humidity,pressure,type,freq_mhz,snr,f_error_hz,sats,batt_v,burst_timer,raw,aux_data\n"
 
     def __init__(self, log_directory="./log"):
         """ Initialise and start a sonde logger.
@@ -176,6 +176,12 @@ class TelemetryLogger(object):
                 )
             else:
                 _log_line += ",-1"
+        else:
+            _log_line += ",-1"
+
+        # Add raw packet if possible
+        if "raw" in telemetry:
+            _log_line += ",%s" % telemetry["raw"]
         else:
             _log_line += ",-1"
 
