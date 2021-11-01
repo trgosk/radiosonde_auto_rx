@@ -6,9 +6,11 @@
 #   Released under GNU GPL v3 or later
 #
 import autorx
+import datetime
 import logging
 import json
 import os
+import os.path
 import signal
 import subprocess
 import time
@@ -16,7 +18,7 @@ import traceback
 from dateutil.parser import parse
 from threading import Thread
 from types import FunctionType, MethodType
-from .utils import AsynchronousFileReader, rtlsdr_test, position_info
+from .utils import AsynchronousFileReader, rtlsdr_test, position_info, generate_aprs_id
 from .gps import get_ephemeris, get_almanac
 from .sonde_specific import *
 from .fsk_demod import FSKDemodStats
@@ -134,7 +136,7 @@ class SondeDecoder(object):
         rs92_ephemeris=None,
         rs41_drift_tweak=False,
         experimental_decoder=False,
-        imet_location="SONDE",
+        save_raw_hex=False
     ):
         """ Initialise and start a Sonde Decoder.
 
@@ -164,8 +166,7 @@ class SondeDecoder(object):
 
             rs41_drift_tweak (bool): If True, add a high-pass filter in the decode chain, which can improve decode performance on drifty SDRs.
             experimental_decoder (bool): If True, use the experimental fsk_demod-based decode chain.
-
-            imet_location (str): OPTIONAL - A location field which is use in the generation of iMet unique ID.
+            save_raw_hex (bool): If True, save the raw hex output from the decoder to a file.
         """
         # Thread running flag
         self.decoder_running = True
@@ -189,7 +190,16 @@ class SondeDecoder(object):
         self.rs92_ephemeris = rs92_ephemeris
         self.rs41_drift_tweak = rs41_drift_tweak
         self.experimental_decoder = experimental_decoder
-        self.imet_location = imet_location
+        self.save_raw_hex = save_raw_hex
+        self.raw_file = None
+
+        # Raw hex filename
+        if self.save_raw_hex:
+            _outfilename = f"{datetime.datetime.utcnow().strftime('%Y%m%d-%H%M%S')}_{self.sonde_type}_{int(self.sonde_freq)}.raw"
+            _outfilename = os.path.join(autorx.logging_path, _outfilename)
+            self.raw_file_option = "-r"
+        else:
+            self.raw_file_option = ""
 
         # iMet ID store. We latch in the first iMet ID we calculate, to avoid issues with iMet-1-RS units
         # which don't necessarily have a consistent packet count to time increment ratio.
@@ -283,6 +293,12 @@ class SondeDecoder(object):
             self.log_error("Could not generate decoder command. Not starting decoder.")
             self.decoder_running = False
         else:
+
+            if self.save_raw_hex:
+                self.log_debug(f"Opening {_outfilename} to save decoder raw data.")
+                # Open the log file in binary mode.
+                self.raw_file = open(_outfilename, 'wb')
+
             # Start up the decoder thread.
             self.decode_process = None
             self.async_reader = None
@@ -469,7 +485,7 @@ class SondeDecoder(object):
                 decode_cmd += " tee decode_%s.wav |" % str(self.device_idx)
 
             # iMet-4 (IMET1RS) decoder
-            decode_cmd += "./imet1rs_dft --json 2>/dev/null"
+            decode_cmd += f"./imet1rs_dft --json {self.raw_file_option} 2>/dev/null"
 
         elif self.sonde_type == "IMET5":
             # iMet-54 Sondes
@@ -489,7 +505,7 @@ class SondeDecoder(object):
 
             # iMet-54 Decoder
             decode_cmd += (
-                "./imet54mod --ecc --IQ 0.0 --lp - 48000 16 --json --ptu 2>/dev/null"
+                f"./imet54mod --ecc --IQ 0.0 --lp - 48000 16 --json --ptu 2>/dev/null"
             )
 
         elif self.sonde_type == "MRZ":
@@ -514,11 +530,16 @@ class SondeDecoder(object):
 
         elif self.sonde_type == "MK2LMS":
             # 1680 MHz LMS6 sondes, using 9600 baud MK2A-format telemetry.
-            # TODO: see if we need to use a high-pass filter, and how much it degrades telemetry reception.
             # This fsk_demod command *almost* works (using the updated fsk_demod)
             # rtl_fm -p 0 -d 0 -M raw -F9 -s 307712 -f 1676000000 2>/dev/null |~/Dev/codec2-upstream/build/src/fsk_demod --cs16 -p 32 --mask=100000 --stats=5  2 307712 9616 - - 2> stats.txt | python ./test/bit_to_samples.py 48080 9616 | sox -t raw -r 48080 -e unsigned-integer -b 8 -c 1 - -r 48080 -b 8 -t wav - 2>/dev/null| ./mk2a_lms1680 --json
 
-            decode_cmd = "%s %s-p %d -d %s %s-M fm -F9 -s 200k -f %d 2>/dev/null |" % (
+            # Notes:
+            # - Have dropped the low-leakage FIR filter (-F9) to save a bit of CPU
+            # Have scaled back sample rate to 220 kHz to again save CPU.
+            # mk2mod runs at ~90% CPU on a RPi 3, with rtl_fm using ~50% of another core.
+            # Update 2021-07-24: Updated version with speedups now taking 240 kHz BW and only using 50% of a core.
+
+            decode_cmd = "%s %s-p %d -d %s %s-M raw -s 240k -f %d 2>/dev/null |" % (
                 self.sdr_fm,
                 bias_option,
                 int(self.ppm),
@@ -526,18 +547,20 @@ class SondeDecoder(object):
                 gain_param,
                 self.sonde_freq,
             )
-            decode_cmd += "sox -t raw -r 200k -e s -b 16 -c 1 - -r 48000 -b 8 -t wav - highpass 20 2>/dev/null |"
 
             # Add in tee command to save audio to disk if debugging is enabled.
-            if self.save_decode_audio:
-                decode_cmd += " tee decode_%s.wav |" % str(self.device_idx)
+            if self.save_decode_iq:
+                decode_cmd += " tee decode_IQ_%s.bin |" % str(self.device_idx)
 
-            # iMet-4 (IMET1RS) decoder
-            if self.inverted:
-                self.log_debug("Using inverted MK2A decoder.")
-                decode_cmd += "./mk2a_lms1680 -i --json 2>/dev/null"
-            else:
-                decode_cmd += "./mk2a_lms1680 --json 2>/dev/null"
+            # LMS6-1680 decoder
+            decode_cmd += f"./mk2mod --iq 0.0 --lpIQ --lpbw 160 --decFM --dc --crc --json {self.raw_file_option} - 240000 16 2>/dev/null"
+            # Settings for old decoder, which cares about FM inversion.
+            # if self.inverted:
+            #     self.log_debug("Using inverted MK2A decoder.")
+                
+            #     decode_cmd += f"./mk2a_lms1680 -i --json {self.raw_file_option} 2>/dev/null"
+            # else:
+            #     decode_cmd += f"./mk2a_lms1680 --json {self.raw_file_option} 2>/dev/null"
 
         elif self.sonde_type.startswith("LMS"):
             # LMS6 Decoder command.
@@ -590,7 +613,7 @@ class SondeDecoder(object):
                 decode_cmd += " tee decode_%s.wav |" % str(self.device_idx)
 
             # Meisei IMS-100 decoder
-            decode_cmd += "./meisei100mod --json 2>/dev/null"
+            decode_cmd += f"./meisei100mod --json 2>/dev/null"
 
         elif self.sonde_type == "UDP":
             # UDP Input Mode.
@@ -658,9 +681,9 @@ class SondeDecoder(object):
             )
 
             if self.telem_raw:
-                decode_cmd = "./rs41mod --ptu2 --json --json-raw-frame --softin -i 2>/dev/null"
+                decode_cmd = f"./rs41mod --ptu2 --json --json-raw-frame --softin -i {self.raw_file_option} 2>/dev/null"
             else:
-                decode_cmd = "./rs41mod --ptu2 --json --softin -i 2>/dev/null"
+                decode_cmd = f"./rs41mod --ptu2 --json --softin -i {self.raw_file_option} 2>/dev/null"
 
             # RS41s transmit pulsed beacons - average over the last 2 frames, and use a peak-hold
             demod_stats = FSKDemodStats(averaging_time=2.0, peak_hold=True)
@@ -780,7 +803,7 @@ class SondeDecoder(object):
 
             # DFM decoder
             decode_cmd = (
-                "./dfm09mod -vv --ecc --json --dist --auto --softin -i 2>/dev/null"
+                f"./dfm09mod -vv --ecc --json --dist --auto --softin -i {self.raw_file_option.upper()} 2>/dev/null"
             )
 
             # DFM sondes transmit continuously - average over the last 2 frames, and peak hold
@@ -821,9 +844,9 @@ class SondeDecoder(object):
 
             # M10 decoder
             if self.telem_raw:
-                decode_cmd = "./m10mod --json --json-raw-frame --ptu -vvv --softin -i 2>/dev/null"
+                decode_cmd = f"./m10mod --json --json-raw-frame --ptu -vvv --softin -i {self.raw_file_option} 2>/dev/null"
             else:
-                decode_cmd = "./m10mod --json --ptu -vvv --softin -i 2>/dev/null"
+                decode_cmd = f"./m10mod --json --ptu -vvv --softin -i {self.raw_file_option} 2>/dev/null"
 
             # M10 sondes transmit in short, irregular pulses - average over the last 2 frames, and use a peak hold
             demod_stats = FSKDemodStats(averaging_time=2.0, peak_hold=True)
@@ -862,9 +885,9 @@ class SondeDecoder(object):
 
             # M20 decoder
             if self.telem_raw:
-                decode_cmd = "./mXXmod --json --json-raw-frame --ptu -vvv --softin -i 2>/dev/null"
+                decode_cmd = f"./mXXmod --json --json-raw-frame --ptu -vvv --softin -i {self.raw_file_option} 2>/dev/null"
             else:
-                decode_cmd = "./mXXmod --json --ptu -vvv --softin -i 2>/dev/null"
+                decode_cmd = f"./mXXmod --json --ptu -vvv --softin -i {self.raw_file_option} 2>/dev/null"
 
             # M20 sondes transmit in short, irregular pulses - average over the last 2 frames, and use a peak hold
             demod_stats = FSKDemodStats(averaging_time=2.0, peak_hold=True)
@@ -903,7 +926,7 @@ class SondeDecoder(object):
                 _baud_rate,
             )
 
-            decode_cmd = "./lms6Xmod --json --softin --vit2 -i 2>/dev/null"
+            decode_cmd = f"./lms6Xmod --json --softin --vit2 -i {self.raw_file_option} 2>/dev/null"
 
             # LMS sondes transmit continuously - average over the last 2 frames, and use a peak hold
             demod_stats = FSKDemodStats(averaging_time=2.0, peak_hold=True)
@@ -942,7 +965,7 @@ class SondeDecoder(object):
                 _baud_rate,
             )
 
-            decode_cmd = "./imet54mod --ecc --json --softin -i --ptu 2>/dev/null"
+            decode_cmd = f"./imet54mod --ecc --json --softin -i --ptu 2>/dev/null"
 
             # iMet54 sondes transmit in bursts. Use a peak hold.
             demod_stats = FSKDemodStats(averaging_time=2.0, peak_hold=True)
@@ -983,12 +1006,46 @@ class SondeDecoder(object):
             )
 
             # MRZ decoder
-            decode_cmd = "./mp3h1mod --auto --json --softin --ptu 2>/dev/null"
+            decode_cmd = f"./mp3h1mod --auto --json --softin --ptu 2>/dev/null"
 
             # MRZ sondes transmit continuously - average over the last frame, and use a peak hold
             demod_stats = FSKDemodStats(averaging_time=1.0, peak_hold=True)
             self.rx_frequency = _freq
 
+        elif self.sonde_type == "MK2LMS":
+            # 1680 MHz LMS6 sondes, using 9600 baud MK2A-format telemetry.
+            # This fsk_demod command *almost* works (using the updated fsk_demod)
+            # rtl_fm -p 0 -d 0 -M raw -F9 -s 307712 -f 1676000000 2>/dev/null |~/Dev/codec2-upstream/build/src/fsk_demod --cs16 -p 32 --mask=100000 --stats=5  2 307712 9616 - - 2> stats.txt | python ./test/bit_to_samples.py 48080 9616 | sox -t raw -r 48080 -e unsigned-integer -b 8 -c 1 - -r 48080 -b 8 -t wav - 2>/dev/null| ./mk2a_lms1680 --json
+
+            # Notes:
+            # - Have dropped the low-leakage FIR filter (-F9) to save a bit of CPU
+            # Have scaled back sample rate to 220 kHz to again save CPU.
+            # mk2mod runs at ~90% CPU on a RPi 3, with rtl_fm using ~50% of another core.
+
+            demod_cmd = "%s %s-p %d -d %s %s-M raw -s 220k -f %d 2>/dev/null |" % (
+                self.sdr_fm,
+                bias_option,
+                int(self.ppm),
+                str(self.device_idx),
+                gain_param,
+                self.sonde_freq,
+            )
+
+            # Add in tee command to save audio to disk if debugging is enabled.
+            if self.save_decode_iq:
+                demod_cmd += " tee decode_IQ_%s.bin |" % str(self.device_idx)
+
+            # LMS6-1680 decoder
+            demod_cmd += f"./mk2mod --iq 0.0 --lpIQ --lpbw 160 --lpFM --dc --crc --json {self.raw_file_option} - 220000 16 2>/dev/null"
+            decode_cmd = None
+            demod_stats = None
+            # Settings for old decoder, which cares about FM inversion.
+            # if self.inverted:
+            #     self.log_debug("Using inverted MK2A decoder.")
+                
+            #     decode_cmd += f"./mk2a_lms1680 -i --json {self.raw_file_option} 2>/dev/null"
+            # else:
+            #     decode_cmd += f"./mk2a_lms1680 --json {self.raw_file_option} 2>/dev/null"
         else:
             return None
 
@@ -1137,9 +1194,14 @@ class SondeDecoder(object):
 
         # Don't even try and decode lines which don't start with a '{'
         # These may be other output from the decoder, which we shouldn't try to parse.
-        # TODO: Perhaps we should add the option to log the raw data output from the decoders?
+        # If we have raw logging enabled, log these lines to disk.
         if data.decode("ascii")[0] != "{":
-            return
+
+            # Save the line verbatim to the raw data file, if we have that enabled
+            if self.raw_file:
+                self.raw_file.write(data)
+            else:
+                return
 
         else:
             try:
@@ -1237,7 +1299,8 @@ class SondeDecoder(object):
             else:
                 # If no subtype field provided, we use the identified sonde type.
                 _telemetry["type"] = self.sonde_type
-                _telemetry["subtype"] = self.sonde_type
+                # Don't include the subtype field if we don't have a subtype.
+                #_telemetry["subtype"] = self.sonde_type
 
             _telemetry["freq_float"] = self.sonde_freq / 1e6
             _telemetry["freq"] = "%.3f MHz" % (self.sonde_freq / 1e6)
@@ -1266,16 +1329,15 @@ class SondeDecoder(object):
                 # Generate a unique ID based on the power-on time and frequency, as iMet sondes don't send one.
                 # Latch this ID and re-use it for the entire decode run.
                 if self.imet_id == None:
-                    self.imet_id = imet_unique_id(_telemetry, custom=self.imet_location)
+                    self.imet_id = imet_unique_id(_telemetry)
 
                 # Re-generate the datetime string.
                 _telemetry["datetime"] = _telemetry["datetime_dt"].strftime(
                     "%Y-%m-%dT%H:%M:%SZ"
                 )
                 _telemetry["id"] = self.imet_id
-                _telemetry["station_code"] = self.imet_location
 
-            # iMet-54 Specific Actions
+            # iMet-5x Specific Actions
             if self.sonde_type == "IMET5":
                 # Fix up the time.
                 _telemetry["datetime_dt"] = fix_datetime(_telemetry["datetime"])
@@ -1309,6 +1371,16 @@ class SondeDecoder(object):
                     # Calculate estimated frequency error from where we expected the sonde to be.
                     _telemetry["f_error"] = _telemetry["f_centre"] - self.sonde_freq
 
+            # Try and generate an APRS callsign for this sonde.
+            # Doing this calculation here allows us to pass it to the web interface to generate an appropriate link
+            try:
+                _telemetry["aprsid"] = generate_aprs_id(_telemetry)
+            except Exception as e:
+                self.log_debug(
+                    f"Couldn't generate APRS ID for {_telemetry['id']}"
+                )
+                _telemetry["aprsid"] = None
+
             # If we have been provided a telemetry filter function, pass the telemetry data
             # through the filter, and return the response
             # By default, we will assume the telemetry is OK.
@@ -1328,6 +1400,7 @@ class SondeDecoder(object):
                 self.exit_state = "TempBlock"
                 self.decoder_running = False
                 return False
+
 
             # If the telemetry is OK, send to the exporter functions (if we have any).
             if self.exporters is None:
@@ -1388,6 +1461,9 @@ class SondeDecoder(object):
 
         if self.decoder is not None and (not nowait):
             self.decoder.join()
+        
+        if self.raw_file:
+            self.raw_file.close()
 
     def running(self):
         """ Check if the decoder subprocess is running. 

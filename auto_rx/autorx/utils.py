@@ -7,6 +7,7 @@
 #
 
 from __future__ import division, print_function
+import codecs
 import fcntl
 import logging
 import os
@@ -40,7 +41,7 @@ REQUIRED_RS_UTILS = [
     "rs41mod",
     "rs92mod",
     "fsk_demod",
-    "mk2a_lms1680",
+    "mk2mod",
     "lms6Xmod",
     "meisei100mod",
     "imet54mod",
@@ -109,7 +110,7 @@ def check_autorx_versions(current_version=auto_rx_version):
         # User is on a testing branch version.
         # Compare against the testing branch version - when a release is made, the testing
         # branch will have the same version as the main branch, then will advance.
-        if semver.compare(_testing_branch_version, current_version):
+        if semver.compare(_testing_branch_version, current_version) == 1:
             # Newer testing version available.
             return _testing_branch_version
         else:
@@ -117,7 +118,7 @@ def check_autorx_versions(current_version=auto_rx_version):
             return "Latest"
     else:
         # User is running the main branch
-        if semver.compare(_main_branch_version, current_version):
+        if semver.compare(_main_branch_version, current_version) == 1:
             return _main_branch_version
         else:
             return "Latest"
@@ -144,7 +145,7 @@ def strip_sonde_serial(serial):
     """ Strip off any leading sonde type that may be present in a serial number """
 
     # Look for serials with prefixes matching the following known sonde types.
-    _re = re.compile("^(DFM|M10|M20|IMET|IMET54|MRZ)-")
+    _re = re.compile("^(DFM|M10|M20|IMET|IMET5|IMET54|MRZ|LMS6)-")
 
     # If we have a match, return the trailing part of the serial, re-adding
     # any - separators if they exist.
@@ -175,13 +176,13 @@ def short_type_lookup(type_name):
     elif type_name.startswith("M20"):
         return "Meteomodem M20"
     elif type_name == "LMS6":
-        return "Lockheed Martin LMS6-400"
+        return "Lockheed Martin LMS6-403"
     elif type_name == "MK2LMS":
         return "Lockheed Martin LMS6-1680"
     elif type_name == "IMET":
         return "Intermet Systems iMet-1/4"
     elif type_name == "IMET5":
-        return "Intermet Systems iMet-54"
+        return "Intermet Systems iMet-5x"
     elif type_name == "MEISEI":
         return "Meisei iMS-100/RS-11"
     elif type_name == "MRZ":
@@ -189,9 +190,128 @@ def short_type_lookup(type_name):
     else:
         return "Unknown"
 
+def short_short_type_lookup(type_name):
+    """ Lookup a short type name to a more descriptive, but short name """
+
+    if type_name.startswith("RS41"):
+        if type_name == "RS41":
+            return "RS41"
+        else:
+            return type_name
+    elif type_name.startswith("RS92"):
+        if type_name == "RS92":
+            return "RS92"
+        else:
+            return type_name
+    elif type_name.startswith("DFM"):
+        return type_name
+    elif type_name.startswith("M10"):
+        return "M10"
+    elif type_name.startswith("M20"):
+        return "M20"
+    elif type_name == "LMS6":
+        return "LMS6-403"
+    elif type_name == "MK2LMS":
+        return "LMS6-1680"
+    elif type_name == "IMET":
+        return "iMet-1/4"
+    elif type_name == "IMET5":
+        return "iMet-5x"
+    elif type_name == "MEISEI":
+        return "iMS-100"
+    elif type_name == "MRZ":
+        return "MRZ"
+    else:
+        return "Unknown"
+
+
+def generate_aprs_id(sonde_data):
+        """ Generate an APRS-compatible object name based on the radiosonde type and ID. """
+
+        _object_name = None
+
+        # Use the radiosonde ID as the object ID
+        if ("RS92" in sonde_data["type"]) or ("RS41" in sonde_data["type"]):
+            # We can use the Vaisala sonde ID directly.
+            _object_name = sonde_data["id"].strip()
+        elif "DFM" in sonde_data["type"]:
+            # As per agreement with other radiosonde decoding software developers, we will now
+            # use the DFM serial number verbatim in the APRS ID, prefixed with 'D'.
+            # For recent DFM sondes, this will result in a object ID of: Dyynnnnnn
+            # Where yy is the manufacture year, and nnnnnn is a sequential serial.
+            # Older DFMs may have only a 6-digit ID of Dnnnnnn.
+            # Mark J - 2019-12-29
+
+            # Split out just the serial number part of the ID, and cast it to an int
+            # This acts as another check that we have been provided with a numeric serial.
+            _dfm_id = int(sonde_data["id"].split("-")[-1])
+
+            # Create the object name
+            _object_name = "D%d" % _dfm_id
+
+            # Convert to upper-case hex, and take the last 5 nibbles.
+            _id_suffix = hex(_dfm_id).upper()[-5:]
+
+        elif "M10" in sonde_data["type"]:
+            # Use the generated id same as dxlAPRS
+            _object_name = sonde_data["aprsid"]
+
+        elif "M20" in sonde_data["type"]:
+            # Generate the M20 ID based on the first two hex digits of the
+            # raw hexadecimal id, followed by the last decimal section.
+            # Why we do this and not just use the three hex bytes, nobody knows...
+            if 'rawid' in sonde_data:
+                _object_name = "ME" + sonde_data['rawid'].split('_')[1][:2] + sonde_data["id"].split("-")[-1]
+            else:
+                _object_name = None
+
+        elif "IMET" in sonde_data["type"]:
+            # Use the last 5 characters of the unique ID we have generated.
+            _object_name = "IMET" + sonde_data["id"][-5:]
+
+
+        elif "LMS" in sonde_data["type"]:
+            # Use the last 5 hex digits of the sonde ID.
+            _id_suffix = int(sonde_data["id"].split("-")[1])
+            _id_hex = hex(_id_suffix).upper()
+            _object_name = "LMS6" + _id_hex[-5:]
+
+        elif "MEISEI" in sonde_data["type"]:
+            # Convert the serial number to an int
+            _meisei_id = int(sonde_data["id"].split("-")[-1])
+            _id_suffix = hex(_meisei_id).upper().split("0X")[1]
+            # Clip to 6 hex digits, in case we end up with more for some reason.
+            if len(_id_suffix) > 6:
+                _id_suffix = _id_suffix[-6:]
+            _object_name = "IMS" + _id_suffix
+
+        elif "MRZ" in sonde_data["type"]:
+            # Concatenate the two portions of the serial number, convert to an int,
+            # then take the 6 least-significant hex digits as our ID, prefixed with 'MRZ'.
+            # e.g. MRZ-5667-39155 -> 566739155 -> 21C7C0D3 -> MRZC7C0D3
+            _mrz_id_parts = sonde_data["id"].split("-")
+            _mrz_id = int(_mrz_id_parts[1] + _mrz_id_parts[2])
+            _id_hex = "%06x" % _mrz_id
+            if len(_id_hex) > 6:
+                _id_hex = _id_hex[-6:]
+            _object_name = "MRZ" + _id_hex.upper()
+
+        # New Sonde types will be added in here.
+        else:
+            # Unknown sonde type, don't know how to handle this yet.
+            _object_name = None
+
+        # Pad or clip to 9 characters
+        if len(_object_name) > 9:
+            _object_name = _object_name[:9]
+        elif len(_object_name) < 9:
+            _object_name = _object_name + " " * (9 - len(_object_name))
+
+        return _object_name
+
 
 def readable_timedelta(duration: timedelta):
-    """ 
+    """
     Convert a timedelta into a readable string.
     From: https://codereview.stackexchange.com/a/245215
     """

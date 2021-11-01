@@ -1,20 +1,41 @@
 # -------------------
 # The build container
 # -------------------
-FROM python:3.7-buster AS build
+FROM debian:buster-slim AS build
 
 # Upgrade base packages.
 RUN apt-get update && \
   apt-get upgrade -y && \
+  apt-get install -y --no-install-recommends \
+    build-essential \
+    cmake \
+    git \
+    libatlas-base-dev \
+    libusb-1.0-0-dev \
+    pkg-config \
+    python3 \
+    python3-dev \
+    python3-pip \
+    python3-setuptools \
+    python3-wheel && \
   rm -rf /var/lib/apt/lists/*
+
+# Compile rtl-sdr from source.
+RUN git clone https://github.com/steve-m/librtlsdr.git /root/librtlsdr && \
+  mkdir -p /root/librtlsdr/build && \
+  cd /root/librtlsdr/build && \
+  cmake -DCMAKE_INSTALL_PREFIX=/root/target/usr/local -Wno-dev ../ && \
+  make && \
+  make install && \
+  rm -rf /root/librtlsdr
 
 # Copy in requirements.txt.
 COPY auto_rx/requirements.txt \
   /root/radiosonde_auto_rx/auto_rx/requirements.txt
 
 # Install Python packages.
-RUN pip3 --no-cache-dir install --user --no-warn-script-location \
-  --extra-index-url https://www.piwheels.org/simple \
+RUN --mount=type=cache,target=/root/.cache/pip pip3 install \
+  --user --no-warn-script-location --ignore-installed --no-binary numpy \
   -r /root/radiosonde_auto_rx/auto_rx/requirements.txt
 
 # Copy in radiosonde_auto_rx.
@@ -27,26 +48,26 @@ RUN /bin/sh build.sh
 # -------------------------
 # The application container
 # -------------------------
-FROM python:3.7-slim-buster
+FROM debian:buster-slim
 
 EXPOSE 5000/tcp
 
 # Upgrade base packages and install application dependencies.
-RUN case $(uname -m) in \
-    "armv6l") extra_packages="libatlas3-base libgfortran5" ;; \
-    "armv7l") extra_packages="libatlas3-base libgfortran5" ;; \
-  esac && \
-  apt-get update && \
+RUN apt-get update && \
   apt-get upgrade -y && \
-  apt-get install -y \
+  apt-get install -y --no-install-recommends \
+  libatlas3-base \
   libatomic1 \
+  python3 \
   rng-tools \
-  rtl-sdr \
   sox \
   tini \
-  usbutils \
-  ${extra_packages} && \
+  usbutils && \
   rm -rf /var/lib/apt/lists/*
+
+# Copy rtl-sdr from the build container.
+COPY --from=build /root/target /
+RUN ldconfig
 
 # Copy any additional Python packages from the build container.
 COPY --from=build /root/.local /root/.local

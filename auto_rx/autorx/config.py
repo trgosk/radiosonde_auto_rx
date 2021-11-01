@@ -161,6 +161,7 @@ def read_auto_rx_config(filename, no_sdr_test=False):
         "save_detection_audio": False,
         "save_decode_audio": False,
         "save_decode_iq": False,
+        "save_raw_hex": False,
         'send_raw_frame_in_telemetry': False,
         # URL for the Habitat DB Server.
         # As of July 2018 we send via sondehub.org, which will allow us to eventually transition away
@@ -280,6 +281,15 @@ def read_auto_rx_config(filename, no_sdr_test=False):
         auto_rx_config["station_lon"] = config.getfloat("location", "station_lon")
         auto_rx_config["station_alt"] = config.getfloat("location", "station_alt")
 
+        if auto_rx_config["station_lat"] > 90.0 or auto_rx_config["station_lat"] < -90.0:
+            logging.critical("Config - Invalid Station Latitude! (Outside +/- 90 degrees!)")
+            return None
+        
+        if auto_rx_config["station_lon"] > 180.0 or auto_rx_config["station_lon"] < -180.0:
+            logging.critical("Config - Invalid Station Longitude! (Outside +/- 180 degrees!)")
+            return None
+
+
         # Position Filtering
         auto_rx_config["max_altitude"] = config.getint("filtering", "max_altitude")
         auto_rx_config["max_radius_km"] = config.getint("filtering", "max_radius_km")
@@ -323,9 +333,11 @@ def read_auto_rx_config(filename, no_sdr_test=False):
         auto_rx_config["aprs_custom_comment"] = config.get(
             "aprs", "aprs_custom_comment"
         )
-        auto_rx_config["aprs_position_report"] = config.getboolean(
-            "aprs", "aprs_position_report"
-        )
+        # 2021-08-08 - Disable option for producing APRS position reports.
+        #auto_rx_config["aprs_position_report"] = config.getboolean(
+        #    "aprs", "aprs_position_report"
+        #)
+        auto_rx_config["aprs_position_report"] = False
         auto_rx_config["station_beacon_enabled"] = config.getboolean(
             "aprs", "station_beacon_enabled"
         )
@@ -557,6 +569,11 @@ def read_auto_rx_config(filename, no_sdr_test=False):
             auto_rx_config["sondehub_upload_rate"] = config.getint(
                 "sondehub", "sondehub_upload_rate"
             )
+            if auto_rx_config["sondehub_upload_rate"] < 10:
+                logging.warning(
+                    "Config - Clipped Sondehub update rate to lower limit of 10 seconds"
+                )
+                auto_rx_config["sondehub_upload_rate"] = 10
         except:
             logging.warning(
                 "Config - Did not find sondehub_enabled setting, using default (enabled / 15 seconds)."
@@ -618,6 +635,26 @@ def read_auto_rx_config(filename, no_sdr_test=False):
             )
             auto_rx_config["web_control"] = False
             auto_rx_config["web_password"] = "none"
+        
+        try:
+            auto_rx_config["save_raw_hex"] = config.getboolean(
+                "debugging", "save_raw_hex"
+            )
+        except:
+            logging.warning(
+                "Config - Did not find save_raw_hex setting, using default (disabled)"
+            )
+            auto_rx_config["save_raw_hex"] = False
+        
+        try:
+            auto_rx_config["experimental_decoders"]["MK2LMS"] = config.getboolean(
+                "advanced", "lms6-1680_experimental"
+            )
+        except:
+            logging.warning(
+                "Config - Did not find lms6-1680_experimental setting, using default (disabled)"
+            )
+            auto_rx_config["experimental_decoders"]["MK2LMS"] = False
 
         # If we are being called as part of a unit test, just return the config now.
         if no_sdr_test:
