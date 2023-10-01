@@ -11,7 +11,8 @@ import logging
 import os
 import traceback
 import json
-from .utils import rtlsdr_test
+from configparser import RawConfigParser
+from .sdr_wrappers import test_sdr
 
 # Dummy initial config with some parameters we need to make the web interface happy.
 global_config = {
@@ -25,13 +26,6 @@ global_config = {
 
 # Web interface credentials
 web_password = "none"
-
-try:
-    # Python 2
-    from ConfigParser import RawConfigParser
-except ImportError:
-    # Python 3
-    from configparser import RawConfigParser
 
 # Fixed minimum update rates for APRS & Habitat
 # These are set to avoid congestion on the APRS-IS network, and on the Habitat server
@@ -70,9 +64,15 @@ def read_auto_rx_config(filename, no_sdr_test=False):
         "email_from": "sonde@localhost",
         "email_to": None,
         "email_subject": "<type> Sonde launch detected on <freq>: <id>",
+        "email_nearby_landing_subject": "Nearby Radiosonde Landing Detected - <id>",
         # SDR Settings
+        "sdr_type": "RTLSDR",
+        "sdr_hostname": "localhost",
+        "sdr_port": 5555,
         "sdr_fm": "rtl_fm",
         "sdr_power": "rtl_power",
+        "ss_iq_path": "./ss_iq",
+        "ss_power_path": "./ss_power",
         "sdr_quantity": 1,
         # Search Parameters
         "min_freq": 400.4,
@@ -81,6 +81,7 @@ def read_auto_rx_config(filename, no_sdr_test=False):
         "only_scan": [],
         "never_scan": [],
         "always_scan": [],
+        "always_decode": [],
         # Location Settings
         "station_lat": 0.0,
         "station_lon": 0.0,
@@ -163,6 +164,8 @@ def read_auto_rx_config(filename, no_sdr_test=False):
         "save_decode_iq": False,
         "save_raw_hex": False,
         'send_raw_frame_in_telemetry': False,
+        "save_system_log": False,
+        "enable_debug_logging": False,
         # URL for the Habitat DB Server.
         # As of July 2018 we send via sondehub.org, which will allow us to eventually transition away
         # from using the habhub.org tracker, and leave it for use by High-Altitude Balloon Hobbyists.
@@ -173,6 +176,7 @@ def read_auto_rx_config(filename, no_sdr_test=False):
         "sondehub_enabled": True,
         "sondehub_upload_rate": 30,
         # "sondehub_contact_email": "none@none.com" # Commented out to ensure a warning message is shown on startup
+        "wideband_sondes": False, # Wideband sonde detection / decoding
     }
 
     try:
@@ -453,29 +457,33 @@ def read_auto_rx_config(filename, no_sdr_test=False):
             "IMET5": True,
             "LMS6": True,
             "MK2LMS": False,
-            "MEISEI": False,
+            "MEISEI": True,
+            "MTS01": False, # Until we test it
             "MRZ": False,  # .... except for the MRZ, until we know it works.
+            "WXR301": True, # No fsk_demod chain for this yet.
             "UDP": False,
         }
 
         auto_rx_config["decoder_spacing_limit"] = config.getint(
             "advanced", "decoder_spacing_limit"
         )
-        auto_rx_config["experimental_decoders"]["RS41"] = config.getboolean(
-            "advanced", "rs41_experimental"
-        )
-        auto_rx_config["experimental_decoders"]["RS92"] = config.getboolean(
-            "advanced", "rs92_experimental"
-        )
-        auto_rx_config["experimental_decoders"]["M10"] = config.getboolean(
-            "advanced", "m10_experimental"
-        )
-        auto_rx_config["experimental_decoders"]["DFM"] = config.getboolean(
-            "advanced", "dfm_experimental"
-        )
-        auto_rx_config["experimental_decoders"]["LMS6"] = config.getboolean(
-            "advanced", "lms6-400_experimental"
-        )
+        # Use 'experimental' (not really, anymore!) decoders for RS41, RS92, M10, DFM and LMS6-400.
+        # Don't allow overriding to the FM based decoders.
+        # auto_rx_config["experimental_decoders"]["RS41"] = config.getboolean(
+        #     "advanced", "rs41_experimental"
+        # )
+        # auto_rx_config["experimental_decoders"]["RS92"] = config.getboolean(
+        #     "advanced", "rs92_experimental"
+        # )
+        # auto_rx_config["experimental_decoders"]["M10"] = config.getboolean(
+        #     "advanced", "m10_experimental"
+        # )
+        # auto_rx_config["experimental_decoders"]["DFM"] = config.getboolean(
+        #     "advanced", "dfm_experimental"
+        # )
+        # auto_rx_config["experimental_decoders"]["LMS6"] = config.getboolean(
+        #     "advanced", "lms6-400_experimental"
+        # )
 
         try:
             auto_rx_config["web_control"] = config.getboolean("web", "web_control")
@@ -656,6 +664,16 @@ def read_auto_rx_config(filename, no_sdr_test=False):
             )
             auto_rx_config["experimental_decoders"]["MK2LMS"] = False
 
+        try:
+            auto_rx_config["email_nearby_landing_subject"] = config.get(
+                "email", "nearby_landing_subject"
+            )
+        except:
+            logging.warning(
+                "Config - Did not find email_nearby_landing_subject setting, using default"
+            )
+            auto_rx_config["email_nearby_landing_subject"] = "Nearby Radiosonde Landing Detected - <id>"
+
 
         # As of auto_rx version 1.5.10, we are limiting APRS output to only radiosondy.info,
         # and only on the non-forwarding port. 
@@ -673,8 +691,8 @@ def read_auto_rx_config(filename, no_sdr_test=False):
         # that this goes against the wishes of the radiosonde_auto_rx developers to not be part
         # of the bigger problem of APRS-IS congestion. 
 
-        ALLOWED_APRS_SERVERS = ["radiosondy.info"]
-        ALLOWED_APRS_PORTS = [14590]
+        ALLOWED_APRS_SERVERS = ["radiosondy.info", "wettersonde.net", "localhost"]
+        ALLOWED_APRS_PORTS = [14580, 14590]
 
         if auto_rx_config["aprs_server"] not in ALLOWED_APRS_SERVERS:
             logging.warning(
@@ -689,45 +707,173 @@ def read_auto_rx_config(filename, no_sdr_test=False):
             auto_rx_config["aprs_port"] = 14590
 
 
+        # 1.6.0 - New SDR options
+        if not config.has_option("sdr", "sdr_type"):
+            logging.warning(
+                "Config - Missing sdr_type configuration option, defaulting to RTLSDR."
+            )
+            auto_rx_config["sdr_type"] = "RTLSDR"
+        else:
+            auto_rx_config["sdr_type"] = config.get("sdr", "sdr_type")
+
+        try:
+            auto_rx_config["sdr_hostname"] = config.get("sdr", "sdr_hostname")
+            auto_rx_config["sdr_port"] = config.getint("sdr", "sdr_port")
+            auto_rx_config["ss_iq_path"] = config.get("advanced", "ss_iq_path")
+            auto_rx_config["ss_power_path"] = config.get("advanced", "ss_power_path")
+        except:
+            logging.debug("Config - Did not find new sdr_type associated options.")
+
+        try:
+            auto_rx_config["always_decode"] = json.loads(
+                config.get("search_params", "always_decode")
+            )
+        except:
+            logging.debug(
+                "Config - No always_decode settings, defaulting to none."
+            )
+            auto_rx_config["always_decode"] = []
+
+        try:
+            auto_rx_config["experimental_decoders"]["MEISEI"] = config.getboolean(
+                "advanced", "meisei_experimental"
+            )
+        except:
+            logging.warning(
+                "Config - Did not find meisei_experimental setting, using default (enabled)"
+            )
+            auto_rx_config["experimental_decoders"]["MEISEI"] = True
+
+        try:
+            auto_rx_config["save_system_log"] = config.getboolean(
+                "logging", "save_system_log"
+            )
+            auto_rx_config["enable_debug_logging"] = config.getboolean(
+                "logging", "enable_debug_logging"
+            )
+        except:
+            logging.warning(
+                "Config - Did not find system / debug logging options, using defaults (disabled, unless set as a command-line option.)"
+            )
+
+        # 1.6.2 - Encrypted Sonde Email Notifications
+        try:
+            auto_rx_config["email_encrypted_sonde_notifications"] = config.getboolean(
+                "email", "encrypted_sonde_notifications"
+            )
+        except:
+            logging.warning(
+                "Config - Did not find encrypted_sonde_notifications setting (new in v1.6.2), using default (True)"
+            )
+            auto_rx_config["email_encrypted_sonde_notifications"] = True
+
+
+        # 1.6.3 - Weathex WXR301d support
+        try:
+            auto_rx_config["wideband_sondes"] = config.getboolean(
+                "advanced", "wideband_sondes"
+            )
+        except:
+            logging.warning(
+                "Config - Missing wideband_sondes option (new in v1.6.3), using default (False)"
+            )
+            auto_rx_config["wideband_sondes"] = False
+
         # If we are being called as part of a unit test, just return the config now.
         if no_sdr_test:
             return auto_rx_config
 
-        # Now we attempt to read in the individual SDR parameters.
+        # Now we enumerate our SDRs.
         auto_rx_config["sdr_settings"] = {}
 
-        for _n in range(1, auto_rx_config["sdr_quantity"] + 1):
-            _section = "sdr_%d" % _n
-            try:
-                _device_idx = config.get(_section, "device_idx")
-                _ppm = round(config.getfloat(_section, "ppm"))
-                _gain = config.getfloat(_section, "gain")
-                _bias = config.getboolean(_section, "bias")
+        if auto_rx_config["sdr_type"] == "RTLSDR":
+            # Multiple RTLSDRs in use - we need to read in each SDRs settings.
+            for _n in range(1, auto_rx_config["sdr_quantity"] + 1):
+                _section = "sdr_%d" % _n
+                try:
+                    _device_idx = config.get(_section, "device_idx")
+                    _ppm = round(config.getfloat(_section, "ppm"))
+                    _gain = config.getfloat(_section, "gain")
+                    _bias = config.getboolean(_section, "bias")
 
-                if (auto_rx_config["sdr_quantity"] > 1) and (_device_idx == "0"):
-                    logging.critical(
-                        "Config - SDR Device ID of 0 used with a multi-SDR configuration. Go read the warning in the config file!"
+                    if (auto_rx_config["sdr_quantity"] > 1) and (_device_idx == "0"):
+                        logging.critical(
+                            "Config - RTLSDR Device ID of 0 used with a multi-SDR configuration. Go read the warning in the config file!"
+                        )
+                        return None
+
+                    # See if the SDR exists.
+                    _sdr_valid = test_sdr(sdr_type = "RTLSDR", rtl_device_idx = _device_idx)
+                    if _sdr_valid:
+                        auto_rx_config["sdr_settings"][_device_idx] = {
+                            "ppm": _ppm,
+                            "gain": _gain,
+                            "bias": _bias,
+                            "in_use": False,
+                            "task": None,
+                        }
+                        logging.info("Config - Tested RTLSDR #%s OK" % _device_idx)
+                    else:
+                        logging.warning("Config - RTLSDR #%s invalid." % _device_idx)
+                except Exception as e:
+                    logging.error(
+                        "Config - Error parsing RTLSDR %d config - %s" % (_n, str(e))
                     )
-                    return None
+                    continue
 
-                # See if the SDR exists.
-                _sdr_valid = rtlsdr_test(_device_idx)
-                if _sdr_valid:
-                    auto_rx_config["sdr_settings"][_device_idx] = {
-                        "ppm": _ppm,
-                        "gain": _gain,
-                        "bias": _bias,
-                        "in_use": False,
-                        "task": None,
-                    }
-                    logging.info("Config - Tested SDR #%s OK" % _device_idx)
-                else:
-                    logging.warning("Config - SDR #%s invalid." % _device_idx)
-            except Exception as e:
-                logging.error(
-                    "Config - Error parsing SDR %d config - %s" % (_n, str(e))
-                )
-                continue
+        elif auto_rx_config["sdr_type"] == "SpyServer":
+            # Test access to the SpyServer
+            _sdr_ok = test_sdr(
+                sdr_type=auto_rx_config["sdr_type"],
+                sdr_hostname=auto_rx_config["sdr_hostname"],
+                sdr_port=auto_rx_config["sdr_port"],
+                ss_iq_path=auto_rx_config["ss_iq_path"],
+                ss_power_path=auto_rx_config["ss_power_path"],
+                check_freq=1e6*(auto_rx_config["max_freq"]+auto_rx_config["min_freq"])/2.0,
+            )
+
+            if not _sdr_ok:
+                logging.critical(f"Config - Could not contact SpyServer {auto_rx_config['sdr_hostname']}:{auto_rx_config['sdr_port']}. Exiting.")
+                return None
+
+            for _n in range(1, auto_rx_config["sdr_quantity"] + 1):
+                _sdr_name = f"SPY{_n:02d}"
+                auto_rx_config["sdr_settings"][_sdr_name] = {
+                    "ppm": 0,
+                    "gain": 0,
+                    "bias": 0,
+                    "in_use": False,
+                    "task": None,
+                }
+
+        elif auto_rx_config["sdr_type"] == "KA9Q":
+            # Test access to the SpyServer
+            _sdr_ok = test_sdr(
+                sdr_type=auto_rx_config["sdr_type"],
+                sdr_hostname=auto_rx_config["sdr_hostname"],
+                sdr_port=auto_rx_config["sdr_port"]
+            )
+
+            if not _sdr_ok:
+                logging.critical(f"Config - Could not contact KA9Q Server {auto_rx_config['sdr_hostname']}:{auto_rx_config['sdr_port']}. Exiting.")
+                return None
+
+            for _n in range(1, auto_rx_config["sdr_quantity"] + 1):
+                _sdr_name = f"KA9Q{_n:02d}"
+                auto_rx_config["sdr_settings"][_sdr_name] = {
+                    "ppm": 0,
+                    "gain": 0,
+                    "bias": 0,
+                    "in_use": False,
+                    "task": None,
+                }
+            
+            logging.critical("Config - KA9Q SDR Support not implemented yet - exiting.")
+            return None
+        
+        else:
+            logging.critical(f"Config - Unknown SDR Type {auto_rx_config['sdr_type']} - exiting.")
+            return None
 
         # Sanity checks when using more than one SDR
         if (len(auto_rx_config["sdr_settings"].keys()) > 1) and (
@@ -756,7 +902,7 @@ def read_auto_rx_config(filename, no_sdr_test=False):
         if len(auto_rx_config["sdr_settings"].keys()) == 0:
             # We have no SDRs to use!!
             logging.error("Config - No working SDRs! Cannot run...")
-            return None
+            raise SystemError("No working SDRs!")
         else:
             # Create a global copy of the configuration file at this point
             global_config = copy.deepcopy(auto_rx_config)
@@ -775,7 +921,8 @@ def read_auto_rx_config(filename, no_sdr_test=False):
             web_password = auto_rx_config["web_password"]
 
             return auto_rx_config
-
+    except SystemError as e:
+        raise e
     except:
         traceback.print_exc()
         logging.error("Could not parse config file.")

@@ -10,14 +10,8 @@ import json
 import logging
 import socket
 import time
+from queue import Queue
 from threading import Thread
-
-try:
-    # Python 2
-    from Queue import Queue
-except ImportError:
-    # Python 3
-    from queue import Queue
 
 
 class OziUploader(object):
@@ -50,7 +44,7 @@ class OziUploader(object):
     ]
 
     # Extra fields we can pass on to other programs.
-    EXTRA_FIELDS = ["bt", "humidity", "sats", "batt", "snr", "fest", "f_centre", "ppm"]
+    EXTRA_FIELDS = ["bt", "humidity", "sats", "batt", "snr", "fest", "f_centre", "ppm", "subtype", "sdr_device_idx"]
 
     def __init__(
         self,
@@ -258,7 +252,9 @@ class OziUploader(object):
         self.input_processing_running = False
 
         if self.input_thread is not None:
-            self.input_thread.join()
+            self.input_thread.join(60)
+            if self.input_thread.is_alive():
+                self.log_error("ozimux input thread failed to join")
 
     def log_debug(self, line):
         """ Helper function to log a debug message with a descriptive heading. 

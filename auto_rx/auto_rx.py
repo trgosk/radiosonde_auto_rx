@@ -8,6 +8,16 @@
 #   Refer github page for instructions on setup and usage.
 #   https://github.com/projecthorus/radiosonde_auto_rx/
 #
+
+# exit status codes:
+#
+# 0 - normal termination (ctrl-c)
+# 1 - critical error, needs human attention to fix
+# 2 - exit because continous running timeout reached
+# 3 - exception occurred, can rerun after resetting SDR
+# 4 - some of the threads failed to join, SDR reset and restart required
+#     this is mostly caused by hung external utilities
+
 import argparse
 import datetime
 import logging
@@ -17,6 +27,7 @@ import time
 import traceback
 import os
 from dateutil.parser import parse
+from queue import Queue
 
 if sys.version_info < (3, 6):
     print("CRITICAL - radiosonde_auto_rx requires Python 3.6 or newer!")
@@ -43,17 +54,12 @@ from autorx.web import (
     start_flask,
     stop_flask,
     flask_emit_event,
+    flask_running,
     WebHandler,
     WebExporter,
 )
 from autorx.gpsd import GPSDAdaptor
-
-try:
-    # Python 2
-    from Queue import Queue
-except ImportError:
-    # Python 3
-    from queue import Queue
+from autorx.sdr_wrappers import shutdown_sdr
 
 
 # Logging level
@@ -162,13 +168,20 @@ def start_scanner():
             detect_dwell_time=config["detect_dwell_time"],
             max_peaks=config["max_peaks"],
             rs_path=RS_PATH,
-            sdr_power=config["sdr_power"],
-            sdr_fm=config["sdr_fm"],
-            device_idx=_device_idx,
+            sdr_type=config["sdr_type"],
+            # Network SDR Options
+            sdr_hostname=config["sdr_hostname"],
+            sdr_port=config["sdr_port"],
+            ss_iq_path=config["ss_iq_path"],
+            ss_power_path=config["ss_power_path"],
+            rtl_power_path=config["sdr_power"],
+            rtl_fm_path=config["sdr_fm"],
+            rtl_device_idx=_device_idx,
             gain=autorx.sdr_list[_device_idx]["gain"],
             ppm=autorx.sdr_list[_device_idx]["ppm"],
             bias=autorx.sdr_list[_device_idx]["bias"],
             save_detection_audio=config["save_detection_audio"],
+            wideband_sondes=config["wideband_sondes"],
             temporary_block_list=temporary_block_list,
             temporary_block_time=config["temporary_block_time"],
         )
@@ -199,12 +212,13 @@ def stop_scanner():
         autorx.task_list.pop("SCAN")
 
 
-def start_decoder(freq, sonde_type):
+def start_decoder(freq, sonde_type, continuous=False):
     """Attempt to start a decoder thread for a given sonde.
 
     Args:
         freq (float): Radiosonde frequency in Hz.
         sonde_type (str): The radiosonde type ('RS41', 'RS92', 'DFM', 'M10, 'iMet')
+        continuous (bool): If true, don't use a decode timeout.
 
     """
     global config, RS_PATH, exporter_functions, rs92_ephemeris, temporary_block_list
@@ -229,26 +243,39 @@ def start_decoder(freq, sonde_type):
         else:
             _exp_sonde_type = sonde_type
 
+        if continuous:
+            _timeout = 0
+        else:
+            _timeout = config["rx_timeout"]
+
         # Initialise a decoder.
         autorx.task_list[freq]["task"] = SondeDecoder(
             sonde_type=sonde_type,
             sonde_freq=freq,
             rs_path=RS_PATH,
-            sdr_fm=config["sdr_fm"],
-            device_idx=_device_idx,
+            sdr_type=config["sdr_type"],
+            # Network SDR Options
+            sdr_hostname=config["sdr_hostname"],
+            sdr_port=config["sdr_port"],
+            ss_iq_path=config["ss_iq_path"],
+            # RTLSDR Options
+            rtl_fm_path=config["sdr_fm"],
+            rtl_device_idx=_device_idx,
             gain=autorx.sdr_list[_device_idx]["gain"],
             ppm=autorx.sdr_list[_device_idx]["ppm"],
             bias=autorx.sdr_list[_device_idx]["bias"],
+            # Other options
             save_decode_audio=config["save_decode_audio"],
             save_decode_iq=config["save_decode_iq"],
             exporter=exporter_functions,
-            timeout=config["rx_timeout"],
+            timeout=_timeout,
             telem_filter=telemetry_filter,
             telem_raw=config['send_raw_frame_in_telemetry'],
             rs92_ephemeris=rs92_ephemeris,
             rs41_drift_tweak=config["rs41_drift_tweak"],
             experimental_decoder=config["experimental_decoders"][_exp_sonde_type],
-            save_raw_hex=config["save_raw_hex"]
+            save_raw_hex=config["save_raw_hex"],
+            wideband_sondes=config["wideband_sondes"]
         )
         autorx.sdr_list[_device_idx]["task"] = autorx.task_list[freq]["task"]
 
@@ -278,6 +305,28 @@ def handle_scan_results():
                 continue
             else:
 
+                # Handle an inverted sonde detection.
+                if _type.startswith("-"):
+                    _inverted = " (Inverted)"
+                    _check_type = _type[1:]
+                else:
+                    _check_type = _type
+                    _inverted = ""
+
+                # Note: We don't indicate if it's been detected as inverted here.
+                logging.info(
+                    "Task Manager - Detected new %s sonde on %.3f MHz!"
+                    % (_check_type, _freq / 1e6)
+                )
+
+                # Break if we don't support this sonde type.
+                if _check_type not in VALID_SONDE_TYPES:
+                    logging.warning(
+                        "Task Manager - Unsupported sonde type: %s" % _check_type
+                    )
+                    # TODO - Potentially add the frequency of the unsupported sonde to the temporary block list?
+                    continue
+
                 # Check that we are not attempting to start a decoder too close to an existing decoder for known 'drifty' radiosonde types.
                 # 'Too close' is defined by the 'decoder_spacing_limit' advanced coniguration option.
                 _too_close = False
@@ -288,9 +337,13 @@ def handle_scan_results():
                         # Extract the currently decoded sonde type from the currently running decoder.
                         _decoding_sonde_type = autorx.task_list[_key]["task"].sonde_type
 
+                        # Remove any inverted decoder information for the comparison.
+                        if _decoding_sonde_type.startswith("-"):
+                            _decoding_sonde_type = _decoding_sonde_type[1:]
+
                         # Only check the frequency spacing if we have a known 'drifty' sonde type, *and* the new sonde type is of the same type.
                         if (_decoding_sonde_type in DRIFTY_SONDE_TYPES) and (
-                            _decoding_sonde_type == _type
+                            _decoding_sonde_type == _check_type
                         ):
                             if abs(_key - _freq) < config["decoder_spacing_limit"]:
                                 # At this point, we can be pretty sure that there is another decoder already decoding this particular sonde ID.
@@ -329,27 +382,6 @@ def handle_scan_results():
                         )
                         temporary_block_list.pop(_freq)
 
-                # Handle an inverted sonde detection.
-                if _type.startswith("-"):
-                    _inverted = " (Inverted)"
-                    _check_type = _type[1:]
-                else:
-                    _check_type = _type
-                    _inverted = ""
-
-                # Note: We don't indicate if it's been detected as inverted here.
-                logging.info(
-                    "Task Manager - Detected new %s sonde on %.3f MHz!"
-                    % (_check_type, _freq / 1e6)
-                )
-
-                # Break if we don't support this sonde type.
-                if _check_type not in VALID_SONDE_TYPES:
-                    logging.warning(
-                        "Task Manager - Unsupported sonde type: %s" % _check_type
-                    )
-                    # TODO - Potentially add the frequency of the unsupported sonde to the temporary block list?
-                    continue
 
                 if allocate_sdr(check_only=True) is not None:
                     # There is a SDR free! Start the decoder on that SDR
@@ -413,6 +445,8 @@ def clean_task_list():
                 email_error(_error_msg)
 
             else:
+                # Shutdown the SDR, if required for the particular SDR type.
+                shutdown_sdr(config["sdr_type"], _task_sdr)
                 # Release its associated SDR.
                 autorx.sdr_list[_task_sdr]["in_use"] = False
                 autorx.sdr_list[_task_sdr]["task"] = None
@@ -443,6 +477,26 @@ def clean_task_list():
     ):
         # We have a SDR free, and we are not running a scan thread. Start one.
         start_scanner()
+
+    # Always-on decoders.
+    if len(config["always_decode"]) > 0:
+        for _entry in config["always_decode"]:
+            try:
+                _freq_hz = float(_entry[0])*1e6
+                _type = str(_entry[1])
+            except:
+                logging.warning(f"Task Manager - Invalid entry found in always_decode list, skipping.")
+                continue
+
+            if _freq_hz in autorx.task_list:
+                # Already running a decoder here.
+                continue
+            else:
+                # Try and start up a decoder.
+                if (allocate_sdr(check_only=True) is not None):
+                    logging.info(f"Task Manager - Starting Always-On Decoder: {_type}, {_freq_hz/1e6:.3f} MHz")
+                    start_decoder(_freq_hz, _type, continuous=True)
+
 
 
 def stop_all():
@@ -579,7 +633,7 @@ def telemetry_filter(telemetry):
 
     # Check Meisei sonde callsigns for validity.
     # meisei_ims returns a callsign of IMS100-xxxxxx until it receives the serial number, so we filter based on the x's being present or not.
-    if "MEISEI" in telemetry["type"]:
+    if "MEISEI" in telemetry["type"] or "IMS100" in telemetry["type"] or "RS11G" in telemetry["type"]:
         meisei_callsign_valid = "x" not in _serial.split("-")[1]
     else:
         meisei_callsign_valid = False
@@ -589,7 +643,7 @@ def telemetry_filter(telemetry):
     else:
         mrz_callsign_valid = False
 
-    # If Vaisala or DFMs, check the callsigns are valid. If M10, iMet or LMS6, just pass it through - we get callsigns immediately and reliably from these.
+    # If Vaisala or DFMs, check the callsigns are valid. If M10/M20, iMet, MTS01 or LMS6, just pass it through - we get callsigns immediately and reliably from these.
     if (
         vaisala_callsign_valid
         or dfm_callsign_valid
@@ -599,6 +653,8 @@ def telemetry_filter(telemetry):
         or ("M20" in telemetry["type"])
         or ("LMS" in telemetry["type"])
         or ("IMET" in telemetry["type"])
+        or ("MTS01" in telemetry["type"])
+        or ("WXR" in telemetry["type"])
     ):
         return "OK"
     else:
@@ -732,6 +788,8 @@ def main():
     _log_suffix = datetime.datetime.utcnow().strftime("%Y%m%d-%H%M%S_system.log")
     _log_path = os.path.join(logging_path, _log_suffix)
 
+    system_log_enabled = False
+
     if args.systemlog:
         # Only write out a logs to a system log file if we have been asked to.
         # Systemd will capture and logrotate our logs anyway, so writing to our own log file is less useful.
@@ -746,6 +804,7 @@ def main():
         stdout_handler = logging.StreamHandler(sys.stdout)
         stdout_handler.setFormatter(stdout_format)
         logging.getLogger().addHandler(stdout_handler)
+        system_log_enabled = True
     else:
         # Otherwise, we only need the stdout logger, which if we don't specify a filename to logging.basicConfig,
         # is the default...
@@ -753,9 +812,6 @@ def main():
             format="%(asctime)s %(levelname)s:%(message)s", level=logging_level
         )
 
-    # Add the web interface logging handler.
-    web_handler = WebHandler()
-    logging.getLogger().addHandler(web_handler)
 
     # Set the requests/socketio loggers (and related) to only display critical log messages.
     logging.getLogger("requests").setLevel(logging.CRITICAL)
@@ -764,6 +820,11 @@ def main():
     logging.getLogger("socketio").setLevel(logging.ERROR)
     logging.getLogger("engineio").setLevel(logging.ERROR)
     logging.getLogger("geventwebsocket").setLevel(logging.ERROR)
+
+    # Check all the RS utilities exist.
+    logging.debug("Checking if required binaries exist")
+    if not check_rs_utils(config):
+        sys.exit(1)
 
     # Attempt to read in config file
     logging.info("Reading configuration file...")
@@ -775,9 +836,35 @@ def main():
         config = _temp_cfg
         autorx.sdr_list = config["sdr_settings"]
 
-    # Check all the RS utilities exist.
-    if not check_rs_utils():
-        sys.exit(1)
+
+    # Apply any logging changes based on configuration file settings.
+    if config["save_system_log"]:
+        # Enable system logging.
+        if system_log_enabled == False:
+            # Clear all existing handlers, and add new ones.
+            logging.basicConfig(
+                format="%(asctime)s %(levelname)s:%(message)s",
+                filename=_log_path,
+                level=logging_level,
+                force=True # This removes all existing handlers before adding new ones.
+            )
+            # Also add a separate stdout logger.
+            stdout_format = logging.Formatter("%(asctime)s %(levelname)s:%(message)s")
+            stdout_handler = logging.StreamHandler(sys.stdout)
+            stdout_handler.setFormatter(stdout_format)
+            logging.getLogger().addHandler(stdout_handler)
+            system_log_enabled = True
+            logging.info("Opened new system log file: %s" % _log_path)
+
+    if config["enable_debug_logging"]:
+        # Set log level to logging.DEBUG
+        logging.getLogger().setLevel(logging.DEBUG)
+        logging.debug("Log level set to DEBUG based on configuration file setting.")
+
+    # Add the web interface logging handler.
+    web_handler = WebHandler()
+    logging.getLogger().addHandler(web_handler)
+
 
     # If a sonde type has been provided, insert an entry into the scan results,
     # and immediately start a decoder. This also sets the decoder time to 0, which
@@ -820,6 +907,7 @@ def main():
             mail_from=config["email_from"],
             mail_to=config["email_to"],
             mail_subject=config["email_subject"],
+            mail_nearby_landing_subject=config["email_nearby_landing_subject"],
             station_position=(
                 config["station_lat"],
                 config["station_lon"],
@@ -827,6 +915,7 @@ def main():
             ),
             launch_notifications=config["email_launch_notifications"],
             landing_notifications=config["email_landing_notifications"],
+            encrypted_sonde_notifications=config["email_encrypted_sonde_notifications"],
             landing_range_threshold=config["email_landing_range_threshold"],
             landing_altitude_threshold=config["email_landing_altitude_threshold"],
         )
@@ -1003,7 +1092,7 @@ def main():
             logging.info("Shutdown time reached. Closing.")
             stop_flask(host=config["web_host"], port=config["web_port"])
             stop_all()
-            break
+            sys.exit(2)
 
 
 if __name__ == "__main__":
@@ -1014,9 +1103,13 @@ if __name__ == "__main__":
         # Upon CTRL+C, shutdown all threads and exit.
         stop_flask(host=config["web_host"], port=config["web_port"])
         stop_all()
+        sys.exit(0)
     except Exception as e:
         # Upon exceptions, attempt to shutdown threads and exit.
         traceback.print_exc()
         print("Main Loop Error - %s" % str(e))
-        stop_flask(host=config["web_host"], port=config["web_port"])
+        if flask_running():
+            stop_flask(host=config["web_host"], port=config["web_port"])
         stop_all()
+        sys.exit(3)
+

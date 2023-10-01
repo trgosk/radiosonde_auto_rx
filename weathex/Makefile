@@ -1,13 +1,11 @@
 CFLAGS += -Ofast
 LDLIBS = -lm
 
-PROGRAMS := imet1rs_dft imet4iq
+PROGRAMS := weathex301d
 
 all: $(PROGRAMS)
 
-imet1rs_dft: imet1rs_dft.o
-
-imet4iq: imet4iq.o
+weathex301d: weathex301d.o
 
 clean:
 	$(RM) $(PROGRAMS) $(PROGRAMS:=.o)

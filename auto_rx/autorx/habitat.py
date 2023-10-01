@@ -15,15 +15,9 @@ import traceback
 import json
 from base64 import b64encode
 from hashlib import sha256
+from queue import Queue
 from threading import Thread, Lock
 from . import __version__ as auto_rx_version
-
-try:
-    # Python 2
-    from Queue import Queue
-except ImportError:
-    # Python 3
-    from queue import Queue
 
 # These get replaced out after init
 url_habitat_uuids = ""
@@ -837,13 +831,20 @@ class HabitatUploader(object):
 
         # Wait for all threads to close.
         if self.upload_thread is not None:
-            self.upload_thread.join()
+            self.upload_thread.join(60)
+            if self.upload_thread.is_alive():
+                self.log_error("habitat upload thread failed to join")
+
 
         if self.timer_thread is not None:
-            self.timer_thread.join()
+            self.timer_thread.join(60)
+            if self.timer_thread.is_alive():
+                self.log_error("habitat timer thread failed to join")
 
         if self.input_thread is not None:
-            self.input_thread.join()
+            self.input_thread.join(60)
+            if self.input_thread.is_alive():
+                self.log_error("habitat input thread failed to join")
 
     def log_debug(self, line):
         """ Helper function to log a debug message with a descriptive heading. 

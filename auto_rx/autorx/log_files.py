@@ -93,6 +93,7 @@ def log_filename_to_stats(filename, quicklook=False):
                     _output["max_range"] = int(max(_output["first"]["range_km"],_output["last"]["range_km"]))
                     _output["last_range"] = int(_output["last"]["range_km"])
                     _output["min_height"] = int(_output["last"]["alt"])
+                    _output["freq"] = _quick["first"]["freq"]
             except Exception as e:
                 logging.error(f"Could not quicklook file {filename}: {str(e)}")
 
@@ -132,6 +133,7 @@ def log_quick_look(filename):
         _first_lat = float(_fields[3])
         _first_lon = float(_fields[4])
         _first_alt = float(_fields[5])
+        _first_freq = float(_fields[13])
         _pos_info = position_info(
             (
                 autorx.config.global_config["station_lat"],
@@ -148,6 +150,7 @@ def log_quick_look(filename):
             "range_km": _pos_info["straight_distance"] / 1000.0,
             "bearing": _pos_info["bearing"],
             "elevation": _pos_info["elevation"],
+            "freq": _first_freq,
         }
     except Exception as e:
         # Couldn't read the first line, so likely no data.
@@ -390,6 +393,11 @@ def calculate_skewt_data(
 
     while i < _burst_idx:
         i += decimation
+
+        # If we've hit the end of our data, break.
+        if i > (len(datetime) - 1):
+            break
+
         try:
             if temperature[i] < -260.0:
                 # If we don't have any valid temp data, just skip this point
@@ -417,7 +425,7 @@ def calculate_skewt_data(
 
             _temp = temperature[i]
 
-            if humidity[i] >= 0.0:
+            if humidity[i] > 0.0:
                 _rh = humidity[i]
 
                 _dp = (
@@ -452,9 +460,8 @@ def calculate_skewt_data(
                 break
 
         except Exception as e:
-            print(str(e))
-
-        # Continue through the data..
+            logging.exception(f"Exception {str(e)} in calculate_skewt_data")
+            raise
 
     return _skewt
 
