@@ -424,7 +424,7 @@ class SondeDecoder(object):
                         self.log_error(
                             "Could not obtain GPS ephemeris or almanac data."
                         )
-                        return None
+                        return (None, None, None)
                     else:
                         _rs92_gps_data = "-a almanac.txt --gpsepoch 2"  # Note - This will need to be updated in... 19 years.
                 else:
@@ -831,9 +831,10 @@ class SondeDecoder(object):
             _baud_rate = 4800
             _sample_rate = 48000 # 10x Oversampling
 
-            # Limit FSK estimator window to roughly +/- 10 kHz
-            _lower = -10000
-            _upper = 10000
+            # Limit FSK estimator window to roughly +/- 5 kHz
+            _lower = -5000
+            _upper = 5000
+
 
             demod_cmd = get_sdr_iq_cmd(
                 sdr_type = self.sdr_type,
@@ -846,14 +847,17 @@ class SondeDecoder(object):
                 ppm = self.ppm,
                 gain = self.gain,
                 bias = self.bias,
-                dc_block = True
+                dc_block = True,
+                channel_filter = 5000 # +/- 5 kHz channel filter.
             )
 
             # Add in tee command to save IQ to disk if debugging is enabled.
             if self.save_decode_iq:
                 demod_cmd += f" tee {self.save_decode_iq_path} |"
 
-            demod_cmd += "./fsk_demod --cs16 -b %d -u %d -s --stats=%d 2 %d %d - -" % (
+            # Use a 4800 Hz mask estimator to better avoid adjacent sonde issues.
+            # Also seems to give a small performance bump.
+            demod_cmd += "./fsk_demod --cs16 -b %d -u %d -s --mask 4800 --stats=%d 2 %d %d - -" % (
                 _lower,
                 _upper,
                 _stats_rate,
@@ -954,15 +958,9 @@ class SondeDecoder(object):
             _baud_rate = 2500
             _sample_rate = 50000 # 10x Oversampling
 
-            # Limit FSK estimator window to roughly +/- 10 kHz
-            _lower = -10000
-            _upper = 10000
-
-            if (abs(403200000 - self.sonde_freq) < 20000) and (self.sdr_type == "RTLSDR"):
-                # Narrow up the frequency estimator window if we are close to
-                # the 403.2 MHz RTLSDR Spur.
-                _lower = -8000
-                _upper = 8000
+            # Limit FSK estimator window to roughly +/- 5 kHz
+            _lower = -5000
+            _upper = 5000
 
             demod_cmd = get_sdr_iq_cmd(
                 sdr_type = self.sdr_type,
@@ -975,7 +973,8 @@ class SondeDecoder(object):
                 ppm = self.ppm,
                 gain = self.gain,
                 bias = self.bias,
-                dc_block = True
+                dc_block = True,
+                channel_filter = 5000
             )
 
             # Add in tee command to save IQ to disk if debugging is enabled.
@@ -983,6 +982,7 @@ class SondeDecoder(object):
                 demod_cmd += f" tee {self.save_decode_iq_path} |"
 
             # NOTE - Using inverted soft decision outputs, so DFM type detection works correctly.
+            # No mask estimator - DFMs seem to decode better without it!
             demod_cmd += "./fsk_demod --cs16 -b %d -u %d -s -i --stats=%d 2 %d %d - -" % (
                 _lower,
                 _upper,
@@ -1396,7 +1396,7 @@ class SondeDecoder(object):
             self.rx_frequency = self.sonde_freq
 
         else:
-            return None
+            return (None, None, None)
 
         return (demod_cmd, decode_cmd, demod_stats)
 
@@ -1603,7 +1603,7 @@ class SondeDecoder(object):
 
                     # Overwrite the datetime field to make the email notifier happy
                     _telemetry['datetime_dt'] = datetime.datetime.now(datetime.timezone.utc)
-                    _telemetry["freq"] = "%.3f MHz" % (self.sonde_freq / 1e6)
+                    _telemetry["freq"] = "%.4f MHz" % (self.sonde_freq / 1e6)
 
                     # Send this to only the Email Notifier, if it exists.
                     for _exporter in self.exporters:
@@ -1678,7 +1678,7 @@ class SondeDecoder(object):
                 #_telemetry["subtype"] = self.sonde_type
 
             _telemetry["freq_float"] = self.sonde_freq / 1e6
-            _telemetry["freq"] = "%.3f MHz" % (self.sonde_freq / 1e6)
+            _telemetry["freq"] = "%.4f MHz" % (self.sonde_freq / 1e6)
 
             # Add in information about the SDR used.
             _telemetry["sdr_device_idx"] = self.rtl_device_idx

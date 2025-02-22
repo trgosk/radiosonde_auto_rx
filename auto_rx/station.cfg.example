@@ -19,10 +19,9 @@
 #
 # RTLSDR - Use one or more RTLSDRs
 # 
-# EXPERIMENTAL / NOT IMPLEMENTED options:
+# Network SDR Server options:
 # SpyServer - Use an Airspy SpyServer
 # KA9Q - Use a KA9Q-Radio Server 
-# WARNING: These are still under development and may not work correctly.
 #
 sdr_type = RTLSDR
 
@@ -140,7 +139,7 @@ always_decode = []
 # STATION LOCATION #
 ####################
 # Used by the Sondehub Uploader, APRS Uploader, and by Rotator Control
-# Lat/Lon in decimal degrees, altitude in metres.
+# Lat/Lon in decimal degrees, altitude in metres (AMSL).
 # Note: You do not need to specify your home station accurately if you don't want to!
 # Feel free to use a position somewhere near your general area, that doesn't identify your home location.
 #
@@ -341,7 +340,11 @@ ozi_update_rate = 5
 # Note - this cannot be enabled in a multi-SDR configuration.
 ozi_enabled = False
 
-# OziMux UDP Broadcast output port.
+# OziMux UDP target host.
+# Defaults to broadcasting
+ozi_host = <broadcast>
+
+# OziMux UDP output port.
 # Set to 8942 to send packets directly into OziPlotter, or set to 55681 to send via OziMux
 ozi_port = 8942
 
@@ -349,6 +352,7 @@ ozi_port = 8942
 # Using this output allows multiple sondes to be plotted in Chasemapper.
 # As of 2019-05, this is enabled by default.
 payload_summary_enabled = True
+payload_summary_host = <broadcast>
 payload_summary_port = 55673
 
 
@@ -438,6 +442,9 @@ rotator_homing_delay = 10
 # Rotator home azimuth/elevation, in degrees true.
 rotator_home_azimuth = 0.0
 rotator_home_elevation = 0.0
+# Azimuth-only rotator - set this to True if your rotator only moves in Azimuth
+# This will force all elevation settings to 0
+azimuth_only = False
 
 
 ###########

@@ -457,12 +457,10 @@ static int get_GPSvel(gpx_t *gpx) {
 
 static int get_SN(gpx_t *gpx) {
     int i;
-    ui8_t  b0 = gpx->frame_bytes[pos_SN]; //0x12
-    ui32_t s2 = (gpx->frame_bytes[pos_SN+2]<<8) | gpx->frame_bytes[pos_SN+1];
-    ui8_t ym = b0 & 0x7F;  // #{0x0,..,0x77}=120=10*12
+    ui32_t sn24 = (gpx->frame_bytes[pos_SN+2]<<16) | (gpx->frame_bytes[pos_SN+1]<<8) | gpx->frame_bytes[pos_SN];
+    ui8_t ym = sn24 & 0x7F;  // #{0x0,..,0x77}=120=10*12
     ui8_t y = ym / 12;
     ui8_t m = (ym % 12)+1; // there is b0=0x69<0x80 from 2018-09-19 ...
-    ui32_t sn_val = 0;
 
     for (i =  0; i < 11; i++) gpx->SN[i] = ' ';  gpx->SN[11] = '\0';
     for (i = 12; i < 15; i++) gpx->SN[i] = '\0'; gpx->SN[15] = '\0';
@@ -470,15 +468,14 @@ static int get_SN(gpx_t *gpx) {
     for (i = 0; i < 3; i++) {
         gpx->SNraw[i] = gpx->frame_bytes[pos_SN + i];
     }
-    sn_val = (gpx->SNraw[0]<<16) | (gpx->SNraw[1]<<8) | gpx->SNraw[2];
 
-    sprintf(gpx->SN, "%u%02u", y, m);           // more samples needed
-    sprintf(gpx->SN+3, "-%u-", (s2&0x3)+2);     // (b0>>7)+1? (s2&0x3)+2?
-    sprintf(gpx->SN+6, "%u", (s2>>(2+13))&0x1); // ?(s2>>(2+13))&0x1 ?? (s2&0x3)?
-    sprintf(gpx->SN+7, "%04u", (s2>>2)&0x1FFF);
+    sprintf(gpx->SN, "%u%02u", y, m);
+    sprintf(gpx->SN+3, "-%u-", ((sn24>> 7)&0x7)+1);
+    sprintf(gpx->SN+6, "%u",    (sn24>>23)&0x1);
+    sprintf(gpx->SN+7, "%04u",  (sn24>>10)&0x1FFF);
 
 
-    if (sn_val == 0)
+    if (sn24 == 0)
     {   // get_GPStime(gpx);
         // replace SN: 001-2-00000 -> 000-0-00000-[_diffcnt]
         sprintf(gpx->SN, "%s", "000-0-00000");
@@ -1111,7 +1108,8 @@ int main(int argc, char **argv) {
             spike = 1;
         }
         else if   (strcmp(*argv, "--ch2") == 0) { sel_wavch = 1; }  // right channel (default: 0=left)
-        else if   (strcmp(*argv, "--softin") == 0) { option_softin = 1; }  // float32 soft input
+        else if   (strcmp(*argv, "--softin") == 0)  { option_softin = 1; }  // float32 soft input
+        else if   (strcmp(*argv, "--softinv") == 0) { option_softin = 2; }  // float32 inverted soft input
         else if   (strcmp(*argv, "--silent") == 0) { gpx.option.slt = 1; }
         else if   (strcmp(*argv, "--ths") == 0) {
             ++argv;
@@ -1315,7 +1313,7 @@ int main(int argc, char **argv) {
         while ( 1 )
         {
             if (option_softin) {
-                header_found = find_softbinhead(fp, &hdb, &_mv);
+                header_found = find_softbinhead(fp, &hdb, &_mv, option_softin == 2);
             }
             else {                                                              // FM-audio:
                 header_found = find_header(&dsp, thres, 2, bitofs, dsp.opt_dc); // optional 2nd pass: dc=0
@@ -1342,9 +1340,9 @@ int main(int argc, char **argv) {
                         float s1 = 0.0;
                         float s2 = 0.0;
                         float s = 0.0;
-                        bitQ = f32soft_read(fp, &s1);
+                        bitQ = f32soft_read(fp, &s1, option_softin == 2);
                         if (bitQ != EOF) {
-                            bitQ = f32soft_read(fp, &s2);
+                            bitQ = f32soft_read(fp, &s2, option_softin == 2);
                             if (bitQ != EOF) {
                                 s = s2-s1; // integrate both symbols  // only 2nd Manchester symbol: s2
                                 bit = (s>=0.0); // no soft decoding
@@ -1378,7 +1376,7 @@ int main(int argc, char **argv) {
                     while ( bitpos < 5*BITFRAME_LEN ) {
                         if (option_softin) {
                             float s = 0.0;
-                            bitQ = f32soft_read(fp, &s);
+                            bitQ = f32soft_read(fp, &s, option_softin == 2);
                         }
                         else {
                             bitQ = read_slbit(&dsp, &bit, 0, bitofs, bitpos, -1, 0); // symlen=2
